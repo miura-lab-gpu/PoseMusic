@@ -276,6 +276,163 @@ namespace PoseMusicApp
 		internal Random Random { get { return _random; } }
 		internal int SampleRate { get { return _sampleRate; } }
 
+		public List<ISampleProvider> GenerateAllTracks(MusicParameters parameters, int durationSeconds)
+		{
+			var allProviders = new List<ISampleProvider>();
+			double beatDuration = 60.0 / parameters.Tempo;
+			var chordProgression = GenerateChordProgression(parameters);
+			var scaleNotes = GetScaleNotes(parameters.ScaleType, parameters.Mood);
+
+			// メロディー生成
+			var melody = GenerateMelody(scaleNotes, parameters, beatDuration, chordProgression, durationSeconds, 0);
+			allProviders.AddRange(melody);
+
+			// 和音生成
+			if (parameters.EnableHarmony)
+			{
+				var harmony = GenerateHarmony(chordProgression, parameters, beatDuration, durationSeconds, 0);
+				allProviders.AddRange(harmony);
+			}
+
+			// ベース生成
+			if (parameters.EnableBass)
+			{
+				var bass = GenerateBass(chordProgression, parameters, beatDuration, durationSeconds, 0);
+				allProviders.AddRange(bass);
+			}
+
+			return allProviders;
+		}
+
+		internal List<ISampleProvider> GenerateMelody(List<float> scaleNotes, MusicParameters parameters,
+	double beatDuration, ChordProgression progression, int durationSeconds, double startOffset)
+		{
+			var providers = new List<ISampleProvider>();
+			double currentTime = 0;
+			int chordIndex = 0;
+			double chordDuration = beatDuration * 4;
+
+			var motifs = GenerateMelodyMotifs(scaleNotes, progression, parameters, beatDuration);
+			int motifIndex = 0;
+			int notesInCurrentMotif = 0;
+			int currentMotifLength = motifs[0].Count;
+			float lastFrequency = motifs[0][0];
+
+			while (currentTime < durationSeconds)
+			{
+				var currentChord = progression.Chords[chordIndex % progression.Chords.Count];
+
+				float frequency;
+				if (notesInCurrentMotif < currentMotifLength)
+				{
+					frequency = motifs[motifIndex % motifs.Count][notesInCurrentMotif];
+					notesInCurrentMotif++;
+				}
+				else
+				{
+					if (_random.NextDouble() < 0.3)
+					{
+						motifIndex++;
+						notesInCurrentMotif = 0;
+						currentMotifLength = motifs[motifIndex % motifs.Count].Count;
+						frequency = motifs[motifIndex % motifs.Count][0];
+					}
+					else
+					{
+						frequency = SelectSmoothMelodyNote(scaleNotes, currentChord, lastFrequency);
+						notesInCurrentMotif = 0;
+					}
+				}
+
+				lastFrequency = frequency;
+				double duration = GetNoteDuration(beatDuration, parameters.Mood);
+
+				var tone = CreateMelodicTone(frequency, duration, parameters.Volume);
+				var offset = new OffsetSampleProvider(tone)
+				{
+					DelayBy = TimeSpan.FromSeconds(startOffset + currentTime)
+				};
+				providers.Add(offset);
+
+				currentTime += duration;
+
+				if (ShouldAddRest(parameters.Mood))
+				{
+					currentTime += beatDuration * 0.25;
+				}
+
+				if (currentTime >= chordDuration * (chordIndex + 1))
+				{
+					chordIndex++;
+				}
+			}
+
+			return providers;
+		}
+
+		internal List<ISampleProvider> GenerateHarmony(ChordProgression progression,
+			MusicParameters parameters, double beatDuration, int durationSeconds, double startOffset)
+		{
+			var providers = new List<ISampleProvider>();
+			double currentTime = 0;
+			double chordDuration = beatDuration * 4;
+			float baseFreq = 261.63f;
+			float harmonyVolume = parameters.Volume * 0.4f;
+
+			while (currentTime < durationSeconds)
+			{
+				foreach (var chord in progression.Chords)
+				{
+					if (currentTime >= durationSeconds) break;
+
+					var chordProviders = GenerateChordByPattern(
+						chord, baseFreq, chordDuration, startOffset + currentTime,
+						harmonyVolume, beatDuration, parameters.HarmonyPatternType);
+
+					providers.AddRange(chordProviders);
+					currentTime += chordDuration;
+				}
+			}
+
+			return providers;
+		}
+
+		internal List<ISampleProvider> GenerateBass(ChordProgression progression,
+			MusicParameters parameters, double beatDuration, int durationSeconds, double startOffset)
+		{
+			var providers = new List<ISampleProvider>();
+			double currentTime = 0;
+			float baseFreq = 130.81f; // C3 (低音)
+			float bassVolume = parameters.Volume * 0.5f;
+
+			while (currentTime < durationSeconds)
+			{
+				foreach (var chord in progression.Chords)
+				{
+					if (currentTime >= durationSeconds) break;
+
+					// ルート音を演奏
+					float rootFreq = baseFreq * (float)Math.Pow(2, chord.Intervals[0] / 12.0);
+
+					// 4拍の間にルート音を2回鳴らす
+					for (int i = 0; i < 2; i++)
+					{
+						if (currentTime >= durationSeconds) break;
+
+						var tone = CreateBassTone(rootFreq, beatDuration * 1.5, bassVolume);
+						var offset = new OffsetSampleProvider(tone)
+						{
+							DelayBy = TimeSpan.FromSeconds(startOffset + currentTime)
+						};
+						providers.Add(offset);
+						currentTime += beatDuration * 2;
+					}
+				}
+			}
+
+			return providers;
+		}
+
 		/// <summary>
 		/// 音楽プロバイダーを生成
 		/// </summary>
@@ -1778,7 +1935,7 @@ namespace PoseMusicApp
 	}
 
 	/// <summary>
-	/// リアルタイムでパラメーター変更可能な動的音楽プロバイダー
+	/// リアルタイムでパラメーター変更可能な動的音楽プロバイダー（高品質版）
 	/// </summary>
 	public class DynamicMusicProvider : ISampleProvider, IDisposable
 	{
@@ -1792,12 +1949,13 @@ namespace PoseMusicApp
 
 		private readonly object _lockObject = new object();
 		private long _totalSamplesRead;
-		private readonly int _bufferSize = 4096;
+		private const int ChunkDurationSeconds = 1; // 1秒分ずつ生成
 
-		// 音楽生成用のキャッシュ
+		// セクションごとのバッファ管理
 		private Queue<float> _audioBuffer;
 		private System.Threading.Thread _generationThread;
 		private bool _isRunning;
+		private double _currentGenerationTime;
 
 		public WaveFormat WaveFormat { get; private set; }
 
@@ -1815,6 +1973,7 @@ namespace PoseMusicApp
 			_isTransitioning = false;
 			_transitionProgress = 0;
 			_audioBuffer = new Queue<float>();
+			_currentGenerationTime = 0;
 
 			WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
 
@@ -1838,17 +1997,7 @@ namespace PoseMusicApp
 
 		private void GenerateAudioLoop()
 		{
-			double currentTime = 0;
-			double noteTime = 0;
-			double beatDuration = 60.0 / _currentParams.Tempo;
-
-			var scaleNotes = _generator.GetScaleNotes(_currentParams.ScaleType, _currentParams.Mood);
-			var melodyRange = scaleNotes.Skip(scaleNotes.Count / 2).ToList();
-			var chordProgression = _generator.GenerateChordProgression(_currentParams);
-
-			int chordIndex = 0;
-			int noteIndex = 0;
-			float lastFrequency = melodyRange[melodyRange.Count / 2];
+			int targetBufferSize = _sampleRate * ChunkDurationSeconds; // 1秒分をバッファに保持
 
 			while (_isRunning)
 			{
@@ -1857,7 +2006,7 @@ namespace PoseMusicApp
 					// トランジション処理
 					if (_isTransitioning && _targetParams != null)
 					{
-						_transitionProgress += 0.05; // 50ms単位で進行
+						_transitionProgress += 0.1; // 100ms単位で進行
 
 						if (_transitionProgress >= _transitionDuration)
 						{
@@ -1865,59 +2014,52 @@ namespace PoseMusicApp
 							_targetParams = null;
 							_isTransitioning = false;
 							_transitionProgress = 0;
-
-							// パラメーター更新時に再生成
-							beatDuration = 60.0 / _currentParams.Tempo;
-							scaleNotes = _generator.GetScaleNotes(_currentParams.ScaleType, _currentParams.Mood);
-							melodyRange = scaleNotes.Skip(scaleNotes.Count / 2).ToList();
-							chordProgression = _generator.GenerateChordProgression(_currentParams);
 						}
 					}
 
-					// バッファに余裕がある場合のみ生成
-					if (_audioBuffer.Count < _bufferSize * 10)
+					// バッファに余裕がある場合、新しいチャンクを生成
+					if (_audioBuffer.Count < targetBufferSize)
 					{
-						// 現在のパラメーターで音を生成
-						var effectiveParams = GetEffectiveParameters();
-						float volume = effectiveParams.Volume;
-
-						// メロディー音を生成
-						if (currentTime >= noteTime)
-						{
-							var currentChord = chordProgression.Chords[chordIndex % chordProgression.Chords.Count];
-							float frequency = SelectNextNote(melodyRange, currentChord, lastFrequency, effectiveParams);
-							lastFrequency = frequency;
-
-							double duration = GetNoteDurationValue(beatDuration, effectiveParams.Mood);
-							int samples = (int)(duration * _sampleRate);
-
-							// 簡易的な音生成
-							for (int i = 0; i < samples; i++)
-							{
-								double t = (double)i / _sampleRate;
-								float envelope = CalculateSimpleEnvelope(t, duration);
-								float sample = (float)(Math.Sin(2 * Math.PI * frequency * t) * volume * 0.3f * envelope);
-								_audioBuffer.Enqueue(sample);
-							}
-
-							noteTime = currentTime + duration;
-							noteIndex++;
-
-							// コード進行
-							if (noteIndex % 8 == 0)
-							{
-								chordIndex++;
-							}
-						}
-
-						currentTime += 0.01; // 10ms進める
+						GenerateNextChunk();
 					}
 					else
 					{
-						System.Threading.Thread.Sleep(10);
+						System.Threading.Thread.Sleep(100);
 					}
 				}
+
+				System.Threading.Thread.Sleep(50);
 			}
+		}
+
+		private void GenerateNextChunk()
+		{
+			var effectiveParams = GetEffectiveParameters();
+
+			// GenerateAllTracksを使用して高品質な音楽を生成
+			var providers = _generator.GenerateAllTracks(effectiveParams, ChunkDurationSeconds);
+
+			// ミキサーでトラックを統合
+			var mixer = new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(_sampleRate, 1))
+			{
+				ReadFully = true
+			};
+
+			foreach (var provider in providers)
+			{
+				mixer.AddMixerInput(provider);
+			}
+
+			// サンプルを読み取ってバッファに追加
+			var buffer = new float[_sampleRate * ChunkDurationSeconds];
+			int samplesRead = mixer.Read(buffer, 0, buffer.Length);
+
+			for (int i = 0; i < samplesRead; i++)
+			{
+				_audioBuffer.Enqueue(buffer[i]);
+			}
+
+			_currentGenerationTime += ChunkDurationSeconds;
 		}
 
 		private MusicParameters GetEffectiveParameters()
@@ -1939,53 +2081,11 @@ namespace PoseMusicApp
 				ScaleType = t < 0.5f ? _currentParams.ScaleType : _targetParams.ScaleType,
 				PatternType = t < 0.5f ? _currentParams.PatternType : _targetParams.PatternType,
 				HarmonyPatternType = t < 0.5f ? _currentParams.HarmonyPatternType : _targetParams.HarmonyPatternType,
-				EnableHarmony = _targetParams.EnableHarmony,
-				EnableBass = _targetParams.EnableBass
+				EnableHarmony = t < 0.5f ? _currentParams.EnableHarmony : _targetParams.EnableHarmony,
+				EnableBass = t < 0.5f ? _currentParams.EnableBass : _targetParams.EnableBass
 			};
 
 			return blended;
-		}
-
-		private float SelectNextNote(List<float> melodyRange, Chord chord, float lastNote, MusicParameters param)
-		{
-			int lastIndex = melodyRange.IndexOf(melodyRange.OrderBy(n => Math.Abs(n - lastNote)).First());
-			int jump = _generator.Random.Next(-3, 4);
-			int newIndex = Math.Max(0, Math.Min(melodyRange.Count - 1, lastIndex + jump));
-			return melodyRange[newIndex];
-		}
-
-		private double GetNoteDurationValue(double beatDuration, MusicMood mood)
-		{
-			double[] durations;
-			switch (mood)
-			{
-				case MusicMood.Energetic:
-					durations = new[] { 0.25, 0.5 };
-					break;
-				case MusicMood.Calm:
-					durations = new[] { 1.0, 1.5 };
-					break;
-				default:
-					durations = new[] { 0.5, 1.0 };
-					break;
-			}
-			return beatDuration * durations[_generator.Random.Next(durations.Length)];
-		}
-
-		private float CalculateSimpleEnvelope(double t, double duration)
-		{
-			double attack = 0.01;
-			double release = 0.05;
-
-			if (t < attack)
-			{
-				return (float)(t / attack);
-			}
-			else if (t > duration - release)
-			{
-				return (float)((duration - t) / release);
-			}
-			return 1.0f;
 		}
 
 		public int Read(float[] buffer, int offset, int count)
