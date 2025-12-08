@@ -808,7 +808,7 @@ namespace PoseMusicApp
 		/// <summary>
 		/// メロディーモチーフを生成（繰り返し可能なフレーズ）
 		/// </summary>
-		private List<List<float>> GenerateMelodyMotifs(List<float> scaleNotes,
+		internal List<List<float>> GenerateMelodyMotifs(List<float> scaleNotes,
 			ChordProgression progression, MusicParameters parameters, double beatDuration)
 		{
 			var motifs = new List<List<float>>();
@@ -1147,7 +1147,7 @@ namespace PoseMusicApp
 		/// <summary>
 		/// 前の音から滑らかに進行する次の音を選択
 		/// </summary>
-		private float SelectSmoothMelodyNote(List<float> scaleNotes, Chord chord, float previousNote)
+		internal float SelectSmoothMelodyNote(List<float> scaleNotes, Chord chord, float previousNote)
 		{
 			var melodyRange = scaleNotes.Skip(scaleNotes.Count / 2).ToList();
 
@@ -1679,7 +1679,7 @@ namespace PoseMusicApp
 		/// <summary>
 		/// 音符の長さを決定
 		/// </summary>
-		private double GetNoteDuration(double beatDuration, MusicMood mood)
+		internal double GetNoteDuration(double beatDuration, MusicMood mood)
 		{
 			double[] durations;
 
@@ -1711,7 +1711,7 @@ namespace PoseMusicApp
 		/// <summary>
 		/// 休符を追加するか判定
 		/// </summary>
-		private bool ShouldAddRest(MusicMood mood)
+		internal bool ShouldAddRest(MusicMood mood)
 		{
 			double probability;
 
@@ -1935,27 +1935,38 @@ namespace PoseMusicApp
 	}
 
 	/// <summary>
-	/// リアルタイムでパラメーター変更可能な動的音楽プロバイダー（高品質版）
+	/// リアルタイムでパラメーター変更可能な動的音楽プロバイダー（改善版）
 	/// </summary>
 	public class DynamicMusicProvider : ISampleProvider, IDisposable
 	{
 		private readonly RandomMusicGenerator _generator;
 		private readonly int _sampleRate;
 		private MusicParameters _currentParams;
-		private MusicParameters _targetParams;
-		private double _transitionProgress;
-		private double _transitionDuration;
-		private bool _isTransitioning;
+		private MusicParameters _nextParams; // 次のパラメーター
+		private bool _parameterChangeRequested;
 
 		private readonly object _lockObject = new object();
 		private long _totalSamplesRead;
-		private const int ChunkDurationSeconds = 1; // 1秒分ずつ生成
 
-		// セクションごとのバッファ管理
+		// 音楽生成の状態管理
 		private Queue<float> _audioBuffer;
 		private System.Threading.Thread _generationThread;
 		private bool _isRunning;
-		private double _currentGenerationTime;
+
+		// 連続生成のための状態
+		private double _currentTime;
+		private int _chordIndex;
+		private int _motifIndex;
+		private int _notesInCurrentMotif;
+		private float _lastFrequency;
+		private List<List<float>> _motifs;
+		private ChordProgression _chordProgression;
+		private List<float> _scaleNotes;
+		private double _beatDuration;
+
+		// 和音の位相を保持（途切れ防止）
+		private Dictionary<float, double> _harmonyPhases;
+		private Dictionary<float, double> _bassPhases;
 
 		public WaveFormat WaveFormat { get; private set; }
 
@@ -1969,13 +1980,16 @@ namespace PoseMusicApp
 			_generator = generator;
 			_sampleRate = sampleRate;
 			_currentParams = initialParams.Clone();
-			_targetParams = null;
-			_isTransitioning = false;
-			_transitionProgress = 0;
+			_nextParams = null;
+			_parameterChangeRequested = false;
 			_audioBuffer = new Queue<float>();
-			_currentGenerationTime = 0;
 
 			WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
+
+			// 初期状態の設定
+			_harmonyPhases = new Dictionary<float, double>();
+			_bassPhases = new Dictionary<float, double>();
+			InitializeMusicState();
 
 			// バックグラウンドで音楽生成
 			_isRunning = true;
@@ -1988,104 +2002,241 @@ namespace PoseMusicApp
 		{
 			lock (_lockObject)
 			{
-				_targetParams = newParams.Clone();
-				_transitionDuration = transitionSeconds;
-				_transitionProgress = 0;
-				_isTransitioning = true;
+				_nextParams = newParams.Clone();
+				_parameterChangeRequested = true;
+				// transitionSecondsは無視して即座に切り替え
 			}
+		}
+
+		private void InitializeMusicState()
+		{
+			_beatDuration = 60.0 / _currentParams.Tempo;
+			_chordProgression = _generator.GenerateChordProgression(_currentParams);
+			_scaleNotes = _generator.GetScaleNotes(_currentParams.ScaleType, _currentParams.Mood);
+			_motifs = _generator.GenerateMelodyMotifs(_scaleNotes, _chordProgression, _currentParams, _beatDuration);
+
+			var melodyRange = _scaleNotes.Skip(_scaleNotes.Count / 2).ToList();
+			_lastFrequency = _motifs[0][0];
+			_currentTime = 0;
+			_chordIndex = 0;
+			_motifIndex = 0;
+			_notesInCurrentMotif = 0;
 		}
 
 		private void GenerateAudioLoop()
 		{
-			int targetBufferSize = _sampleRate * ChunkDurationSeconds; // 1秒分をバッファに保持
+			int targetBufferSize = _sampleRate * 1; // 1秒分をバッファに保持
+			double chordDuration = _beatDuration * 4;
 
 			while (_isRunning)
 			{
 				lock (_lockObject)
 				{
-					// トランジション処理
-					if (_isTransitioning && _targetParams != null)
+					// パラメーター変更があれば即座に適用
+					if (_parameterChangeRequested && _nextParams != null)
 					{
-						_transitionProgress += 0.1; // 100ms単位で進行
+						_currentParams = _nextParams.Clone();
+						_nextParams = null;
+						_parameterChangeRequested = false;
 
-						if (_transitionProgress >= _transitionDuration)
-						{
-							_currentParams = _targetParams.Clone();
-							_targetParams = null;
-							_isTransitioning = false;
-							_transitionProgress = 0;
-						}
+						// 状態をリセットして新しいパラメーターで生成開始
+						InitializeMusicState();
+						chordDuration = _beatDuration * 4;
 					}
 
-					// バッファに余裕がある場合、新しいチャンクを生成
+					// バッファに余裕がある場合、音を生成
 					if (_audioBuffer.Count < targetBufferSize)
 					{
-						GenerateNextChunk();
+						GenerateContinuousAudio(chordDuration);
 					}
 					else
 					{
-						System.Threading.Thread.Sleep(100);
+						System.Threading.Thread.Sleep(10);
 					}
 				}
 
-				System.Threading.Thread.Sleep(50);
+				System.Threading.Thread.Sleep(5);
 			}
 		}
 
-		private void GenerateNextChunk()
+		private void GenerateContinuousAudio(double chordDuration)
 		{
-			var effectiveParams = GetEffectiveParameters();
+			var currentChord = _chordProgression.Chords[_chordIndex % _chordProgression.Chords.Count];
+			var melodyRange = _scaleNotes.Skip(_scaleNotes.Count / 2).ToList();
 
-			// GenerateAllTracksを使用して高品質な音楽を生成
-			var providers = _generator.GenerateAllTracks(effectiveParams, ChunkDurationSeconds);
+			// メロディー音を生成
+			float frequency;
+			int currentMotifLength = _motifs[_motifIndex % _motifs.Count].Count;
 
-			// ミキサーでトラックを統合
-			var mixer = new MixingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(_sampleRate, 1))
+			if (_notesInCurrentMotif < currentMotifLength)
 			{
-				ReadFully = true
-			};
-
-			foreach (var provider in providers)
+				frequency = _motifs[_motifIndex % _motifs.Count][_notesInCurrentMotif];
+				_notesInCurrentMotif++;
+			}
+			else
 			{
-				mixer.AddMixerInput(provider);
+				if (_generator.Random.Next(0, 100) < 30)
+				{
+					_motifIndex++;
+					_notesInCurrentMotif = 0;
+					currentMotifLength = _motifs[_motifIndex % _motifs.Count].Count;
+					frequency = _motifs[_motifIndex % _motifs.Count][0];
+				}
+				else
+				{
+					frequency = _generator.SelectSmoothMelodyNote(_scaleNotes, currentChord, _lastFrequency);
+					_notesInCurrentMotif = 0;
+				}
 			}
 
-			// サンプルを読み取ってバッファに追加
-			var buffer = new float[_sampleRate * ChunkDurationSeconds];
-			int samplesRead = mixer.Read(buffer, 0, buffer.Length);
+			_lastFrequency = frequency;
+			double duration = _generator.GetNoteDuration(_beatDuration, _currentParams.Mood);
+			int samples = (int)(duration * _sampleRate);
 
-			for (int i = 0; i < samplesRead; i++)
+			// 和音の周波数リストを準備
+			List<float> harmonyFrequencies = new List<float>();
+			if (_currentParams.EnableHarmony)
 			{
-				_audioBuffer.Enqueue(buffer[i]);
+				float baseFreq = 261.63f;
+				foreach (var interval in currentChord.Intervals)
+				{
+					float harmFreq = baseFreq * (float)Math.Pow(2, interval / 12.0);
+					harmonyFrequencies.Add(harmFreq);
+
+					// 新しい周波数の場合は位相を初期化
+					if (!_harmonyPhases.ContainsKey(harmFreq))
+					{
+						_harmonyPhases[harmFreq] = 0;
+					}
+				}
 			}
 
-			_currentGenerationTime += ChunkDurationSeconds;
+			// ベースの周波数を準備
+			float bassFreq = 0;
+			if (_currentParams.EnableBass)
+			{
+				bassFreq = 130.81f * (float)Math.Pow(2, currentChord.Intervals[0] / 12.0);
+				if (!_bassPhases.ContainsKey(bassFreq))
+				{
+					_bassPhases[bassFreq] = 0;
+				}
+			}
+
+			// メロディーサンプルを生成
+			for (int i = 0; i < samples; i++)
+			{
+				double t = (double)i / _sampleRate;
+				float envelope = CalculateEnvelope(t, duration);
+				float melodySample = (float)(Math.Sin(2 * Math.PI * frequency * t) * _currentParams.Volume * 0.7f * envelope);
+
+				float totalSample = melodySample;
+
+				// 和音を追加（位相を連続的に更新）
+				if (_currentParams.EnableHarmony)
+				{
+					float harmonySample = 0;
+					foreach (var harmFreq in harmonyFrequencies)
+					{
+						harmonySample += (float)(Math.Sin(_harmonyPhases[harmFreq]) * _currentParams.Volume * 0.25f / harmonyFrequencies.Count);
+						_harmonyPhases[harmFreq] += 2 * Math.PI * harmFreq / _sampleRate;
+
+						// 位相を0-2πの範囲に保つ
+						if (_harmonyPhases[harmFreq] > 2 * Math.PI * 1000)
+						{
+							_harmonyPhases[harmFreq] = _harmonyPhases[harmFreq] % (2 * Math.PI);
+						}
+					}
+					totalSample += harmonySample;
+				}
+
+				// ベースを追加（位相を連続的に更新）
+				if (_currentParams.EnableBass)
+				{
+					float bassEnvelope = envelope * 0.8f; // ベースは少し柔らかめ
+					float bassSample = (float)(Math.Sin(_bassPhases[bassFreq]) * _currentParams.Volume * 0.4f * bassEnvelope);
+					totalSample += bassSample;
+
+					_bassPhases[bassFreq] += 2 * Math.PI * bassFreq / _sampleRate;
+
+					// 位相を0-2πの範囲に保つ
+					if (_bassPhases[bassFreq] > 2 * Math.PI * 1000)
+					{
+						_bassPhases[bassFreq] = _bassPhases[bassFreq] % (2 * Math.PI);
+					}
+				}
+
+				_audioBuffer.Enqueue(totalSample);
+			}
+
+			_currentTime += duration;
+
+			// 休符
+			if (_generator.ShouldAddRest(_currentParams.Mood))
+			{
+				int restSamples = (int)(_beatDuration * 0.25 * _sampleRate);
+
+				// 休符中も和音とベースの位相は進め続ける（途切れ防止）
+				for (int i = 0; i < restSamples; i++)
+				{
+					float restSample = 0;
+
+					// 和音を小さく鳴らし続ける
+					if (_currentParams.EnableHarmony)
+					{
+						foreach (var harmFreq in harmonyFrequencies)
+						{
+							restSample += (float)(Math.Sin(_harmonyPhases[harmFreq]) * _currentParams.Volume * 0.15f / harmonyFrequencies.Count);
+							_harmonyPhases[harmFreq] += 2 * Math.PI * harmFreq / _sampleRate;
+						}
+					}
+
+					// ベースも小さく鳴らし続ける
+					if (_currentParams.EnableBass)
+					{
+						restSample += (float)(Math.Sin(_bassPhases[bassFreq]) * _currentParams.Volume * 0.2f);
+						_bassPhases[bassFreq] += 2 * Math.PI * bassFreq / _sampleRate;
+					}
+
+					_audioBuffer.Enqueue(restSample);
+				}
+				_currentTime += _beatDuration * 0.25;
+			}
+
+			// コード進行（コード変更時は位相をクリア）
+			if (_currentTime >= chordDuration * (_chordIndex + 1))
+			{
+				_chordIndex++;
+				// コード変更時は古い位相をクリアしないで維持（滑らかに繋がる）
+			}
 		}
 
-		private MusicParameters GetEffectiveParameters()
+		private float GenerateHarmonySample(Chord chord, double t, float volume)
 		{
-			if (!_isTransitioning || _targetParams == null)
+			// このメソッドは使用しない（位相管理版に置き換え）
+			return 0;
+		}
+
+		private float CalculateEnvelope(double t, double duration)
+		{
+			double attack = 0.01;
+			double decay = 0.05;
+			double sustain = 0.7;
+			double release = 0.05;
+
+			if (t < attack)
 			{
-				return _currentParams;
+				return (float)(t / attack);
 			}
-
-			// トランジション中は中間的なパラメーターを返す
-			float t = (float)(_transitionProgress / _transitionDuration);
-			t = Math.Max(0, Math.Min(1, t));
-
-			var blended = new MusicParameters
+			else if (t < attack + decay)
 			{
-				Tempo = (int)(_currentParams.Tempo * (1 - t) + _targetParams.Tempo * t),
-				Volume = _currentParams.Volume * (1 - t) + _targetParams.Volume * t,
-				Mood = t < 0.5f ? _currentParams.Mood : _targetParams.Mood,
-				ScaleType = t < 0.5f ? _currentParams.ScaleType : _targetParams.ScaleType,
-				PatternType = t < 0.5f ? _currentParams.PatternType : _targetParams.PatternType,
-				HarmonyPatternType = t < 0.5f ? _currentParams.HarmonyPatternType : _targetParams.HarmonyPatternType,
-				EnableHarmony = t < 0.5f ? _currentParams.EnableHarmony : _targetParams.EnableHarmony,
-				EnableBass = t < 0.5f ? _currentParams.EnableBass : _targetParams.EnableBass
-			};
-
-			return blended;
+				double decayT = (t - attack) / decay;
+				return (float)(1.0 - (1.0 - sustain) * decayT);
+			}
+			else if (t > duration - release)
+			{
+				return (float)(sustain * ((duration - t) / release));
+			}
+			return (float)sustain;
 		}
 
 		public int Read(float[] buffer, int offset, int count)
