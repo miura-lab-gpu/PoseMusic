@@ -19,6 +19,8 @@ namespace PoseMusicApp
 		{
 			var generator = new RandomMusicGenerator();
 
+			
+
 			// 明るくエネルギッシュな曲（和音・ベースあり）
 			var happyParams = new MusicParameters
 			{
