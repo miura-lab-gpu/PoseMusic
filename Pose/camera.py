@@ -72,7 +72,6 @@ def send_data(pose_result, gesture_result, frame_id):
                     "z": landmark.z
                 })
             data["hand"].append(landmarks)
-    print(json.dumps(data, indent=2))
     udp.sendto(json.dumps(data).encode('utf-8'), udp_addr)
 
 pose_model_path = r"./Model/pose_landmarker_full.task"
