@@ -1,25 +1,32 @@
+import os
+os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import cv2
 import mediapipe as mp
 import numpy as np
-from pathlib import Path
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+from mediapipe import solutions
 from mediapipe.framework.formats import landmark_pb2
 
-model_path = r"./Model/pose_landmarker_full.task"
+pose_model_path = r"./Model/pose_landmarker_full.task"
+gesture_model_path = r"./Model/gesture_recognizer.task"
 
-BaseOptions = mp.tasks.BaseOptions
-PoseLandmarker = mp.tasks.vision.PoseLandmarker
-PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-PoseLandmarkerResult = mp.tasks.vision.PoseLandmarkerResult
-VisionRunningMode = mp.tasks.vision.RunningMode
+BaseOptions = python.BaseOptions
+PoseLandmarker = vision.PoseLandmarker
+PoseLandmarkerOptions = vision.PoseLandmarkerOptions
+PoseLandmarkerResult = vision.PoseLandmarkerResult
+GestureRecognizer = vision.GestureRecognizer
+GestureRecognizerOptions = vision.GestureRecognizerOptions
+GestureRecognizerResult = vision.GestureRecognizerResult
+VisionRunningMode = vision.RunningMode
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
-mp_draw = mp.solutions.drawing_utils
 
-with open(model_path, "rb") as f:
-    model_buffer = f.read()
+with open(pose_model_path, "rb") as f:
+    pose_model_buffer = f.read()
+with open(gesture_model_path, "rb") as f:
+    gesture_model_buffer = f.read()
 
-def draw_landmarks_on_image(rgb_image, detection_result):
+def draw_pose_landmarks_on_image(rgb_image, detection_result):
     pose_landmarks_list = detection_result.pose_landmarks
     annotated_image = np.copy(rgb_image)
 
@@ -32,26 +39,46 @@ def draw_landmarks_on_image(rgb_image, detection_result):
         pose_landmarks_proto.landmark.extend([
             landmark_pb2.NormalizedLandmark(x=landmark.x, y=landmark.y, z=landmark.z) for landmark in pose_landmarks
         ])
-        mp.solutions.drawing_utils.draw_landmarks(
-        annotated_image,
-        pose_landmarks_proto,
-        mp.solutions.pose.POSE_CONNECTIONS,
-        mp.solutions.drawing_styles.get_default_pose_landmarks_style())
+        solutions.drawing_utils.draw_landmarks(
+            annotated_image,
+            pose_landmarks_proto,
+            solutions.pose.POSE_CONNECTIONS,
+            solutions.drawing_styles.get_default_pose_landmarks_style())
     return annotated_image
 
-result_frame = None
-def print_result(result: PoseLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
-    global result_frame
-    result_frame = draw_landmarks_on_image(output_image.numpy_view(), result)
+def draw_hand_landmarks_on_image(rgb_image, detection_result):
+    hand_landmarks_list = detection_result.hand_landmarks
+    annotated_image = np.copy(rgb_image)
 
-options = PoseLandmarkerOptions(
-    base_options=BaseOptions(model_asset_buffer=model_buffer),
-    running_mode=VisionRunningMode.LIVE_STREAM,
-    result_callback=print_result,
+    # Loop through the detected poses to visualize.
+    for idx in range(len(hand_landmarks_list)):
+        hand_landmarks = hand_landmarks_list[idx]
+
+        # Draw the pose landmarks.
+        hand_landmarks_proto = landmark_pb2.NormalizedLandmarkList()
+        hand_landmarks_proto.landmark.extend([
+            landmark_pb2.NormalizedLandmark(x=landmark.x, y=landmark.y, z=landmark.z) for landmark in hand_landmarks
+        ])
+        solutions.drawing_utils.draw_landmarks(
+            annotated_image,
+            hand_landmarks_proto,
+            solutions.hands.HAND_CONNECTIONS,
+            solutions.drawing_styles.get_default_hand_landmarks_style())
+    return annotated_image
+
+
+pose_options = PoseLandmarkerOptions(
+    base_options=BaseOptions(model_asset_buffer=pose_model_buffer),
+    running_mode=VisionRunningMode.VIDEO,
     num_poses=3)
+hand_options = GestureRecognizerOptions(
+    base_options=BaseOptions(model_asset_buffer=gesture_model_buffer),
+    running_mode=VisionRunningMode.VIDEO,
+    num_hands=6)
 
 cap = cv2.VideoCapture(0)
-with PoseLandmarker.create_from_options(options) as landmarker:
+frame_id = 0
+with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, GestureRecognizer.create_from_options(hand_options) as recognizer:
     while True:
         ret, frame = cap.read()
         if (not ret):
@@ -59,12 +86,25 @@ with PoseLandmarker.create_from_options(options) as landmarker:
 
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        
+        pose_result = pose_landmarker.detect_for_video(mp_image, frame_id)
+        gesture_result = recognizer.recognize_for_video(mp_image, frame_id)
+        frame_id += 1
+        result_frame = draw_pose_landmarks_on_image(frame, pose_result)
+        result_frame = draw_hand_landmarks_on_image(result_frame, gesture_result)
 
-        landmarker.detect_async(mp_image, int(cap.get(cv2.CAP_PROP_POS_MSEC)))
+        gesture_text = ""
+        if gesture_result.gestures:
+            for i, hand_gestures in enumerate(gesture_result.gestures):
+                if hand_gestures:
+                    # Get the top gesture from the list.
+                    top_gesture = hand_gestures[0]
+                    gesture_text += f"Hand {i}: {top_gesture.category_name} ({top_gesture.score:.2f})  "
+        cv2.putText(result_frame, f"{gesture_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
-        if result_frame is not None:
-            cv2.imshow('Pose Landmarker', cv2.cvtColor(result_frame, cv2.COLOR_RGB2BGR))
-        if (cv2.waitKey(100) & 0xFF == ord('q')):
+        cv2.imshow('Landmarker', result_frame)
+
+        if (cv2.waitKey(1) & 0xFF == ord('q')):
             break
 cap.release()
 cv2.destroyAllWindows()
