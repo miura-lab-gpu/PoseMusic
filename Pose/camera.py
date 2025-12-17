@@ -7,6 +7,73 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from mediapipe import solutions
 from mediapipe.framework.formats import landmark_pb2
+import socket, struct, json, time
+
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.bind(("127.0.0.1", 9000))
+server.settimeout(0.5)
+server.listen(1)
+connection = None
+try:
+    connection, _ = server.accept()
+except socket.timeout:
+    print("No connection established.")
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.settimeout(0.5)
+udp_addr = ("127.0.0.1", 9001)
+
+def send_image(img):
+    if not connection:
+        return
+    _, jpg = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    data = jpg.tobytes()
+    connection.sendall(struct.pack(">I", len(data)))
+    connection.sendall(data)
+
+def send_data(pose_result, gesture_result, frame_id):
+    data = {
+        "frame_id": frame_id,
+        "timestamp": int(time.time() * 1000),
+        "pose": [],
+        "gesture": [],
+        "hand": []
+    }
+
+    if pose_result.pose_landmarks:
+        data["pose"] = []
+        for pose_landmarks in pose_result.pose_landmarks:
+            landmarks = []
+            for landmark in pose_landmarks:
+                landmarks.append({
+                    "x": landmark.x,
+                    "y": landmark.y,
+                    "z": landmark.z
+                })
+            data["pose"].append(landmarks)
+    if gesture_result.gestures:
+        data["gesture"] = []
+        for hand_gestures in gesture_result.gestures:
+            hand_data = []
+            for gesture in hand_gestures:
+                hand_data.append({
+                    "category_name": gesture.category_name,
+                    "score": gesture.score
+                })
+            data["gesture"].append(hand_data)
+    if gesture_result.hand_landmarks:
+        data["hand"] = []
+        for hand_landmarks in gesture_result.hand_landmarks:
+            landmarks = []
+            for landmark in hand_landmarks:
+                landmarks.append({
+                    "x": landmark.x,
+                    "y": landmark.y,
+                    "z": landmark.z
+                })
+            data["hand"].append(landmarks)
+    print(json.dumps(data, indent=2))
+    udp.sendto(json.dumps(data).encode('utf-8'), udp_addr)
 
 pose_model_path = r"./Model/pose_landmarker_full.task"
 gesture_model_path = r"./Model/gesture_recognizer.task"
@@ -103,6 +170,9 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, Gestur
         cv2.putText(result_frame, f"{gesture_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
         cv2.imshow('Landmarker', result_frame)
+
+        send_image(result_frame)
+        send_data(pose_result, gesture_result, frame_id)
 
         if (cv2.waitKey(1) & 0xFF == ord('q')):
             break
