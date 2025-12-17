@@ -175,3 +175,6 @@ TestResults/
 *.trx
 *.coverage
 *.coveragexml
+
+
+venv/*
