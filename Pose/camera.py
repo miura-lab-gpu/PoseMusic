@@ -8,7 +8,14 @@ from mediapipe.tasks.python import vision
 from mediapipe import solutions
 from mediapipe.framework.formats import landmark_pb2
 import socket, struct, json, time
+import argparse
 
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--not_show_image", action="store_true")
+parser.add_argument("--not_print_debug_image", action="store_true")
+
+args = parser.parse_args()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind(("127.0.0.1", 9000))
@@ -35,13 +42,13 @@ def send_data(pose_result, gesture_result, frame_id):
     data = {
         "frame_id": frame_id,
         "timestamp": int(time.time() * 1000),
-        "pose": [],
-        "gesture": [],
-        "hand": []
+        "poses": [],
+        "gestures": [],
+        "hands": []
     }
 
     if pose_result.pose_landmarks:
-        data["pose"] = []
+        data["poses"] = []
         for pose_landmarks in pose_result.pose_landmarks:
             landmarks = []
             for landmark in pose_landmarks:
@@ -50,9 +57,9 @@ def send_data(pose_result, gesture_result, frame_id):
                     "y": landmark.y,
                     "z": landmark.z
                 })
-            data["pose"].append(landmarks)
+            data["poses"].append(landmarks)
     if gesture_result.gestures:
-        data["gesture"] = []
+        data["gestures"] = []
         for hand_gestures in gesture_result.gestures:
             hand_data = []
             for gesture in hand_gestures:
@@ -60,9 +67,9 @@ def send_data(pose_result, gesture_result, frame_id):
                     "category_name": gesture.category_name,
                     "score": gesture.score
                 })
-            data["gesture"].append(hand_data)
+            data["gestures"].append(hand_data)
     if gesture_result.hand_landmarks:
-        data["hand"] = []
+        data["hands"] = []
         for hand_landmarks in gesture_result.hand_landmarks:
             landmarks = []
             for landmark in hand_landmarks:
@@ -71,7 +78,7 @@ def send_data(pose_result, gesture_result, frame_id):
                     "y": landmark.y,
                     "z": landmark.z
                 })
-            data["hand"].append(landmarks)
+            data["hands"].append(landmarks)
     udp.sendto(json.dumps(data).encode('utf-8'), udp_addr)
 
 pose_model_path = r"./Model/pose_landmarker_full.task"
@@ -156,19 +163,23 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, Gestur
         pose_result = pose_landmarker.detect_for_video(mp_image, frame_id)
         gesture_result = recognizer.recognize_for_video(mp_image, frame_id)
         frame_id += 1
-        result_frame = draw_pose_landmarks_on_image(frame, pose_result)
-        result_frame = draw_hand_landmarks_on_image(result_frame, gesture_result)
+        if (not args.not_print_debug_image):
+            result_frame = draw_pose_landmarks_on_image(frame, pose_result)
+            result_frame = draw_hand_landmarks_on_image(result_frame, gesture_result)
 
-        gesture_text = ""
-        if gesture_result.gestures:
-            for i, hand_gestures in enumerate(gesture_result.gestures):
-                if hand_gestures:
-                    # Get the top gesture from the list.
-                    top_gesture = hand_gestures[0]
-                    gesture_text += f"Hand {i}: {top_gesture.category_name} ({top_gesture.score:.2f})  "
-        cv2.putText(result_frame, f"{gesture_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            gesture_text = ""
+            if gesture_result.gestures:
+                for i, hand_gestures in enumerate(gesture_result.gestures):
+                    if hand_gestures:
+                        # Get the top gesture from the list.
+                        top_gesture = hand_gestures[0]
+                        gesture_text += f"Hand {i}: {top_gesture.category_name} ({top_gesture.score:.2f})  "
+            cv2.putText(result_frame, f"{gesture_text}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+        else:
+            result_frame = frame
 
-        cv2.imshow('Landmarker', result_frame)
+        if (not args.not_show_image): 
+            cv2.imshow('Landmarker', result_frame)
 
         send_image(result_frame)
         send_data(pose_result, gesture_result, frame_id)

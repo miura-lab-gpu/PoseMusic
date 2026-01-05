@@ -17,7 +17,7 @@ namespace PoseMusicApp
 		[STAThread]
 		static void Main()
 		{
-			var generator = new RandomMusicGenerator();
+			/*var generator = new RandomMusicGenerator();
 
 			
 
@@ -123,7 +123,7 @@ namespace PoseMusicApp
 
 			// 停止
 			generator.StopPlayback();
-			Console.WriteLine("Playback stopped.");
+			Console.WriteLine("Playback stopped.");*/
 
 
 
