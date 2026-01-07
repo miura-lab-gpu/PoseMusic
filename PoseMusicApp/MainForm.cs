@@ -54,7 +54,11 @@ namespace PoseMusicApp
 		{
 			base.OnClosed(e);
 
-			cameraPy?.Kill();
+			try
+			{
+				cameraPy?.Kill();
+			}
+			catch (InvalidOperationException) { }
 		}
 	}
 }
