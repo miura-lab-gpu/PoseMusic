@@ -80,6 +80,45 @@ namespace PoseMusicApp
 		public List<List<Landmark>> poses;
 		public List<List<Gesture>> gestures;
 		public List<List<Landmark>> hands;
+
+		public PoseData GetVelocityData(PoseData previous)
+		{
+			if (previous == null) return null;
+			long time = timestamp - previous.timestamp;
+			PoseData poseData = new PoseData();
+			poseData.frame_id = frame_id;
+			poseData.timestamp = timestamp;
+			poseData.poses = new List<List<Landmark>>();
+			poseData.hands = new List<List<Landmark>>();
+			for (int i = 0; i < poses.Count; i++)
+			{
+				poseData.poses.Add(new List<Landmark>());
+				for (int j = 0; j < poses[i].Count; j++)
+				{
+					Landmark landmark = new Landmark();
+					landmark.x = (poses[i][j].x - previous.poses[i][j].x) / (time / 1000f);
+					landmark.y = (poses[i][j].y - previous.poses[i][j].y) / (time / 1000f);
+					landmark.z = (poses[i][j].z - previous.poses[i][j].z) / (time / 1000f);
+					poseData.poses[i].Add(landmark);
+				}
+			}
+			for (int i = 0; i < hands.Count; i ++)
+			{
+				poseData.hands.Add(new List<Landmark>());
+				for (int j = 0; j < hands[i].Count; j++)
+				{
+					try
+					{
+						Landmark landmark = new Landmark();
+						landmark.x = (hands[i][j].x - previous.hands[i][j].x) / (time / 1000f);
+						landmark.y = (hands[i][j].y - previous.hands[i][j].y) / (time / 1000f);
+						landmark.z = (hands[i][j].z - previous.hands[i][j].z) / (time / 1000f);
+						poseData.hands[i].Add(landmark);
+					} catch (ArgumentOutOfRangeException) {}
+				}
+			}
+			return poseData;
+		}
 	}
 
 	[Serializable]

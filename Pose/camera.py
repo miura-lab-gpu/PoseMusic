@@ -38,7 +38,7 @@ def send_image(img):
     connection.sendall(struct.pack(">I", len(data)))
     connection.sendall(data)
 
-def send_data(pose_result, gesture_result, frame_id):
+def send_data(pose_result, gesture_result, frame_id, img_height, img_width):
     data = {
         "frame_id": frame_id,
         "timestamp": int(time.time() * 1000),
@@ -53,9 +53,9 @@ def send_data(pose_result, gesture_result, frame_id):
             landmarks = []
             for landmark in pose_landmarks:
                 landmarks.append({
-                    "x": landmark.x,
-                    "y": landmark.y,
-                    "z": landmark.z
+                    "x": landmark.x * img_width,
+                    "y": landmark.y * img_height,
+                    "z": landmark.z * img_width
                 })
             data["poses"].append(landmarks)
     if gesture_result.gestures:
@@ -74,9 +74,9 @@ def send_data(pose_result, gesture_result, frame_id):
             landmarks = []
             for landmark in hand_landmarks:
                 landmarks.append({
-                    "x": landmark.x,
-                    "y": landmark.y,
-                    "z": landmark.z
+                    "x": landmark.x * img_width,
+                    "y": landmark.y * img_height,
+                    "z": landmark.z * img_width
                 })
             data["hands"].append(landmarks)
     udp.sendto(json.dumps(data).encode('utf-8'), udp_addr)
@@ -181,8 +181,9 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, Gestur
         if (not args.not_show_image): 
             cv2.imshow('Landmarker', result_frame)
 
+        height, width = frame.shape[:2]
         send_image(result_frame)
-        send_data(pose_result, gesture_result, frame_id)
+        send_data(pose_result, gesture_result, frame_id, height, width)
 
         if (cv2.waitKey(1) & 0xFF == ord('q')):
             break

@@ -11,6 +11,7 @@ namespace PoseMusicApp
 	{
 		private DataReceiver receiver;
 		private Process cameraPy;
+		private DataWrapper dataWrapper;
 
 		public MainForm()
 		{
@@ -19,6 +20,7 @@ namespace PoseMusicApp
 			StartCameraPy();
 			
 			receiver = new DataReceiver(UdpCallback, TcpCallback);
+			dataWrapper = new DataWrapper();
 		}
 
 		private void StartCameraPy()
@@ -38,7 +40,7 @@ namespace PoseMusicApp
 
 		private void UdpCallback(PoseData data)
 		{
-			Console.WriteLine(JsonConvert.SerializeObject(data));
+			dataWrapper.InputData(data);
 		}
 
 		private void TcpCallback(Image img)
